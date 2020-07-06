@@ -13,6 +13,7 @@ import (
 	"github.com/go-spatial/tegola"
 	"github.com/go-spatial/tegola/internal/env"
 	"github.com/go-spatial/tegola/internal/log"
+	"github.com/go-spatial/tegola/provider"
 )
 
 var blacklistHeaders = []string{"content-encoding", "content-length", "content-type"}
@@ -28,9 +29,14 @@ type Config struct {
 	Webserver    Webserver `toml:"webserver"`
 	Cache        env.Dict  `toml:"cache"`
 	// Map of providers.
-	Providers    []env.Dict `toml:"providers"`
-	MVTProviders []env.Dict `toml:"mvt_providers"`
-	Maps         []Map      `toml:"maps"`
+	//  all providers must have at least two entries.
+	// 1. name -- this is the name that is referenced in
+	// the maps section
+	// 2. type -- this is the name the provider modules register
+	// themselves under. (e.g. postgis, gpkg, mvt_postgis )
+	// Note: Use the type to figure out if the provider is a mvt or std provider
+	Providers []env.Dict `toml:"providers"`
+	Maps      []Map      `toml:"maps"`
 }
 
 type Webserver struct {
@@ -92,17 +98,42 @@ func (ml MapLayer) GetName() (string, error) {
 // checks the config for issues
 func (c *Config) Validate() error {
 
-	var name string
-	// let's get a list of mvt providers
-	mvtproviders := make(map[string]bool, len(c.MVTProviders))
-	for i := range c.MVTProviders {
-		name, _ = c.MVTProviders[i].String("name", nil)
-		if name == "" {
-			continue
-		}
-		mvtproviders[name] = true
+	var knownTypes []string
+	drivers := make(map[string]int)
+	for _, name := range provider.Drivers(provider.ProviderFilterStd) {
+		drivers[name] = provider.ProviderFilterStd
+		knownTypes = append(knownTypes, name)
 	}
-
+	for _, name := range provider.Drivers(provider.ProviderFilterMVT) {
+		drivers[name] = provider.ProviderFilterMVT
+		knownTypes = append(knownTypes, name)
+	}
+	// mvtproviders maps a known provider name to weather that provider is
+	// an mvt provider or not.
+	mvtproviders := make(map[string]bool, len(c.Providers))
+	for i, prvd := range c.Providers {
+		name, _ := prvd.String("name", nil)
+		if name == "" {
+			return ErrProviderNameRequired{Pos: i}
+		}
+		typ, _ := prvd.String("type", nil)
+		if typ == "" {
+			return ErrProviderTypeRequired{Pos: i}
+		}
+		// Check to see if the name has already been seen before.
+		if _, ok := mvtproviders[name]; ok {
+			return ErrProviderNameDuplicate{Pos: i}
+		}
+		drv, ok := drivers[typ]
+		if !ok {
+			return ErrUnknownProviderType{
+				Name:           name,
+				Type:           typ,
+				KnownProviders: knownTypes,
+			}
+		}
+		mvtproviders[name] = drv == provider.ProviderFilterMVT
+	}
 	// check for map layer name / zoom collisions
 	// map of layers to providers
 	mapLayers := map[string]map[string]MapLayer{}
@@ -130,10 +161,18 @@ func (c *Config) Validate() error {
 				provider = pname
 			}
 
+			isMvt, doesExists := mvtproviders[pname]
+			if !doesExists {
+				return ErrInvalidProviderForMap{
+					MapName:      string(m.Name),
+					ProviderName: pname,
+				}
+			}
+
 			// check to see if any of the prior provider or this one is
 			// an mvt provider. If it is, then the mvtProvider check needs
 			// to be done
-			isMVTProvider = isMVTProvider || mvtproviders[pname]
+			isMVTProvider = isMVTProvider || isMvt
 
 			// only need to do this check if we are dealing with MVTProviders
 			if isMVTProvider && pname != provider {

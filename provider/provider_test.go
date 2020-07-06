@@ -9,7 +9,7 @@ import (
 
 func TestProviderInterface(t *testing.T) {
 	if _, err := provider.For(test.Name, nil); err != nil {
-		t.Errorf("retieve provider err , expected nil got %v", err)
+		t.Errorf("retrieve provider err , expected nil got %v", err)
 		return
 	}
 	if test.Count != 1 {
